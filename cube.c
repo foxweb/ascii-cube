@@ -1,117 +1,152 @@
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-float A, B, C;
+enum { WIDTH = 160, HEIGHT = 44, PIXELS = WIDTH * HEIGHT };
 
-float cubeWidth = 20;
-int width = 160, height = 44;
-float zBuffer[160 * 44];
-char buffer[160 * 44];
-int backgroundASCIICode = '.';
-int distanceFromCam = 100;
-float horizontalOffset;
-float K1 = 40;
+static float A, B, C;
+static float zBuffer[PIXELS];
+static char buffer[PIXELS];
+static char frameOut[PIXELS + HEIGHT];
 
-float incrementSpeed = 0.6;
+static const char BACKGROUND = '.';
+static const float DISTANCE_FROM_CAM = 100.f;
+static const float K1 = 40.f;
 
-float x, y, z;
-float ooz;
-int xp, yp;
-int idx;
+/* Rotation matrix rows after updateRotation(). */
+static float R00, R01, R02;
+static float R10, R11, R12;
+static float R20, R21, R22;
 
-float calculateX(int i, int j, int k) {
-  return j * sin(A) * sin(B) * cos(C) - k * cos(A) * sin(B) * cos(C) +
-         j * cos(A) * sin(C) + k * sin(A) * sin(C) + i * cos(B) * cos(C);
+static void restoreTerminal(void) {
+  printf("\x1b[?25h\x1b[0m\n");
+  fflush(stdout);
 }
 
-float calculateY(int i, int j, int k) {
-  return j * cos(A) * cos(C) + k * sin(A) * cos(C) -
-         j * sin(A) * sin(B) * sin(C) + k * cos(A) * sin(B) * sin(C) -
-         i * cos(B) * sin(C);
+static void onSignal(int sig) {
+  (void)sig;
+  restoreTerminal();
+  _exit(0);
 }
 
-float calculateZ(int i, int j, int k) {
-  return k * cos(A) * cos(B) - j * sin(A) * cos(B) + i * sin(B);
+static void updateRotation(void) {
+  float sA = sinf(A), cA = cosf(A);
+  float sB = sinf(B), cB = cosf(B);
+  float sC = sinf(C), cC = cosf(C);
+
+  R00 = cB * cC;
+  R01 = sA * sB * cC + cA * sC;
+  R02 = -cA * sB * cC + sA * sC;
+  R10 = -cB * sC;
+  R11 = cA * cC - sA * sB * sC;
+  R12 = sA * cC + cA * sB * sC;
+  R20 = sB;
+  R21 = -sA * cB;
+  R22 = cA * cB;
 }
 
-void calculateForSurface(float cubeX, float cubeY, float cubeZ, int ch) {
-  x = calculateX(cubeX, cubeY, cubeZ);
-  y = calculateY(cubeX, cubeY, cubeZ);
-  z = calculateZ(cubeX, cubeY, cubeZ) + distanceFromCam;
+static void plot(float x, float y, float z, float horizontalOffset, char ch) {
+  z += DISTANCE_FROM_CAM;
+  if (z <= 0.f) {
+    return;
+  }
 
-  ooz = 1 / z;
+  float ooz = 1.f / z;
+  int xp = (int)(WIDTH / 2 + horizontalOffset + K1 * ooz * x * 2.f);
+  int yp = (int)(HEIGHT / 2 + K1 * ooz * y);
 
-  xp = (int)(width / 2 + horizontalOffset + K1 * ooz * x * 2);
-  yp = (int)(height / 2 + K1 * ooz * y);
+  if ((unsigned)xp >= (unsigned)WIDTH || (unsigned)yp >= (unsigned)HEIGHT) {
+    return;
+  }
 
-  idx = xp + yp * width;
-  if (idx >= 0 && idx < width * height) {
-    if (ooz > zBuffer[idx]) {
-      zBuffer[idx] = ooz;
-      buffer[idx] = ch;
-    }
+  int idx = xp + yp * WIDTH;
+  if (ooz > zBuffer[idx]) {
+    zBuffer[idx] = ooz;
+    buffer[idx] = ch;
   }
 }
 
-int main() {
-  printf("\x1b[2J");
-  while (1) {
-    memset(buffer, backgroundASCIICode, width * height);
-    memset(zBuffer, 0, width * height * 4);
-    cubeWidth = 20;
-    horizontalOffset = -2 * cubeWidth;
-    // first cube
-    for (float cubeX = -cubeWidth; cubeX < cubeWidth; cubeX += incrementSpeed) {
-      for (float cubeY = -cubeWidth; cubeY < cubeWidth;
-           cubeY += incrementSpeed) {
-        calculateForSurface(cubeX, cubeY, -cubeWidth, '@');
-        calculateForSurface(cubeWidth, cubeY, cubeX, '$');
-        calculateForSurface(-cubeWidth, cubeY, -cubeX, '~');
-        calculateForSurface(-cubeX, cubeY, cubeWidth, '#');
-        calculateForSurface(cubeX, -cubeWidth, -cubeY, ';');
-        calculateForSurface(cubeX, cubeWidth, cubeY, '+');
-      }
-    }
-    cubeWidth = 10;
-    horizontalOffset = 1 * cubeWidth;
-    // second cube
-    for (float cubeX = -cubeWidth; cubeX < cubeWidth; cubeX += incrementSpeed) {
-      for (float cubeY = -cubeWidth; cubeY < cubeWidth;
-           cubeY += incrementSpeed) {
-        calculateForSurface(cubeX, cubeY, -cubeWidth, '@');
-        calculateForSurface(cubeWidth, cubeY, cubeX, '$');
-        calculateForSurface(-cubeWidth, cubeY, -cubeX, '~');
-        calculateForSurface(-cubeX, cubeY, cubeWidth, '#');
-        calculateForSurface(cubeX, -cubeWidth, -cubeY, ';');
-        calculateForSurface(cubeX, cubeWidth, cubeY, '+');
-      }
-    }
-    cubeWidth = 5;
-    horizontalOffset = 8 * cubeWidth;
-    // third cube
-    for (float cubeX = -cubeWidth; cubeX < cubeWidth; cubeX += incrementSpeed) {
-      for (float cubeY = -cubeWidth; cubeY < cubeWidth;
-           cubeY += incrementSpeed) {
-        calculateForSurface(cubeX, cubeY, -cubeWidth, '@');
-        calculateForSurface(cubeWidth, cubeY, cubeX, '$');
-        calculateForSurface(-cubeWidth, cubeY, -cubeX, '~');
-        calculateForSurface(-cubeX, cubeY, cubeWidth, '#');
-        calculateForSurface(cubeX, -cubeWidth, -cubeY, ';');
-        calculateForSurface(cubeX, cubeWidth, cubeY, '+');
-      }
-    }
-    printf("\x1b[H");
-    for (int k = 0; k < width * height; k++) {
-      putchar(k % width ? buffer[k] : 10);
-    }
+static void renderFace(int half, float horizontalOffset, char ch, int i0,
+                       int j0, int k0, int diu, int dju, int dku, int div,
+                       int djv, int dkv) {
+  float Xu = R00 * diu + R01 * dju + R02 * dku;
+  float Yu = R10 * diu + R11 * dju + R12 * dku;
+  float Zu = R20 * diu + R21 * dju + R22 * dku;
+  float Xv = R00 * div + R01 * djv + R02 * dkv;
+  float Yv = R10 * div + R11 * djv + R12 * dkv;
+  float Zv = R20 * div + R21 * djv + R22 * dkv;
 
-    A += 0.05;
-    B += 0.05;
-    C += 0.01;
+  float X = R00 * i0 + R01 * j0 + R02 * k0;
+  float Y = R10 * i0 + R11 * j0 + R12 * k0;
+  float Z = R20 * i0 + R21 * j0 + R22 * k0;
+
+  int n = half * 2;
+  for (int u = 0; u < n; u++) {
+    float x = X, y = Y, z = Z;
+    for (int v = 0; v < n; v++) {
+      plot(x, y, z, horizontalOffset, ch);
+      x += Xv;
+      y += Yv;
+      z += Zv;
+    }
+    X += Xu;
+    Y += Yu;
+    Z += Zu;
+  }
+}
+
+static void renderCube(int half, float horizontalOffset) {
+  /* Face parameterization matches the original six surfaces. */
+  renderFace(half, horizontalOffset, '@', -half, -half, -half, 1, 0, 0, 0, 1,
+             0);
+  renderFace(half, horizontalOffset, '$', half, -half, -half, 0, 0, 1, 0, 1, 0);
+  renderFace(half, horizontalOffset, '~', -half, -half, half, 0, 0, -1, 0, 1,
+             0);
+  renderFace(half, horizontalOffset, '#', half, -half, half, -1, 0, 0, 0, 1, 0);
+  renderFace(half, horizontalOffset, ';', -half, -half, half, 1, 0, 0, 0, 0,
+             -1);
+  renderFace(half, horizontalOffset, '+', -half, half, -half, 1, 0, 0, 0, 0, 1);
+}
+
+static void presentFrame(void) {
+  int n = 0;
+  for (int row = 0; row < HEIGHT; row++) {
+    memcpy(frameOut + n, buffer + row * WIDTH, WIDTH);
+    n += WIDTH;
+    frameOut[n++] = '\n';
+  }
+  fwrite(frameOut, 1, (size_t)n, stdout);
+}
+
+int main(void) {
+  setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+  signal(SIGINT, onSignal);
+  signal(SIGTERM, onSignal);
+  atexit(restoreTerminal);
+
+  printf("\x1b[2J\x1b[?25l");
+
+  while (1) {
+    memset(buffer, BACKGROUND, sizeof buffer);
+    memset(zBuffer, 0, sizeof zBuffer);
+    updateRotation();
+
+    renderCube(20, -2.f * 20.f);
+    renderCube(10, 1.f * 10.f);
+    renderCube(5, 8.f * 5.f);
+
+    printf("\x1b[H");
+    presentFrame();
+    fflush(stdout);
+
+    A += 0.05f;
+    B += 0.05f;
+    C += 0.01f;
     usleep(8000 * 2);
   }
+
   return 0;
 }
-
