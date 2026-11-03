@@ -3,14 +3,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
-enum { WIDTH = 160, HEIGHT = 44, PIXELS = WIDTH * HEIGHT };
+enum { MAX_WIDTH = 200, MAX_HEIGHT = 100, MAX_PIXELS = MAX_WIDTH * MAX_HEIGHT };
+
+static int width = 80;
+static int height = 24;
 
 static float A, B, C;
-static float zBuffer[PIXELS];
-static char buffer[PIXELS];
-static char frameOut[PIXELS + HEIGHT];
+static float zBuffer[MAX_PIXELS];
+static char buffer[MAX_PIXELS];
+static char frameOut[MAX_PIXELS + MAX_HEIGHT];
 
 static const char BACKGROUND = '.';
 static const float DISTANCE_FROM_CAM = 100.f;
@@ -22,7 +26,7 @@ static float R10, R11, R12;
 static float R20, R21, R22;
 
 static void restoreTerminal(void) {
-  printf("\x1b[?25h\x1b[0m\n");
+  printf("\x1b[?25h\x1b[0m\x1b[?1049l");
   fflush(stdout);
 }
 
@@ -30,6 +34,34 @@ static void onSignal(int sig) {
   (void)sig;
   restoreTerminal();
   _exit(0);
+}
+
+static void syncTerminalSize(void) {
+  struct winsize ws;
+  int cols = 80;
+  int rows = 24;
+
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 &&
+      ws.ws_row > 0) {
+    cols = ws.ws_col;
+    rows = ws.ws_row;
+  }
+
+  if (cols > MAX_WIDTH) {
+    cols = MAX_WIDTH;
+  }
+  if (rows > MAX_HEIGHT) {
+    rows = MAX_HEIGHT;
+  }
+  if (cols < 20) {
+    cols = 20;
+  }
+  if (rows < 10) {
+    rows = 10;
+  }
+
+  width = cols;
+  height = rows;
 }
 
 static void updateRotation(void) {
@@ -55,14 +87,14 @@ static void plot(float x, float y, float z, float horizontalOffset, char ch) {
   }
 
   float ooz = 1.f / z;
-  int xp = (int)(WIDTH / 2 + horizontalOffset + K1 * ooz * x * 2.f);
-  int yp = (int)(HEIGHT / 2 + K1 * ooz * y);
+  int xp = (int)(width / 2 + horizontalOffset + K1 * ooz * x * 2.f);
+  int yp = (int)(height / 2 + K1 * ooz * y);
 
-  if ((unsigned)xp >= (unsigned)WIDTH || (unsigned)yp >= (unsigned)HEIGHT) {
+  if ((unsigned)xp >= (unsigned)width || (unsigned)yp >= (unsigned)height) {
     return;
   }
 
-  int idx = xp + yp * WIDTH;
+  int idx = xp + yp * width;
   if (ooz > zBuffer[idx]) {
     zBuffer[idx] = ooz;
     buffer[idx] = ch;
@@ -112,13 +144,23 @@ static void renderCube(int half, float horizontalOffset) {
 }
 
 static void presentFrame(void) {
+  /* Home cursor, then overwrite the same rows. No '\n' after the last row —
+     that would scroll the terminal when height == window rows. */
   int n = 0;
-  for (int row = 0; row < HEIGHT; row++) {
-    memcpy(frameOut + n, buffer + row * WIDTH, WIDTH);
-    n += WIDTH;
-    frameOut[n++] = '\n';
+  frameOut[n++] = '\x1b';
+  frameOut[n++] = '[';
+  frameOut[n++] = 'H';
+
+  for (int row = 0; row < height; row++) {
+    memcpy(frameOut + n, buffer + row * width, (size_t)width);
+    n += width;
+    if (row + 1 < height) {
+      frameOut[n++] = '\n';
+    }
   }
+
   fwrite(frameOut, 1, (size_t)n, stdout);
+  fflush(stdout);
 }
 
 int main(void) {
@@ -127,20 +169,25 @@ int main(void) {
   signal(SIGTERM, onSignal);
   atexit(restoreTerminal);
 
-  printf("\x1b[2J\x1b[?25l");
+  syncTerminalSize();
+
+  /* Alternate screen: animation stays in one buffer, scrollback untouched. */
+  printf("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l");
+  fflush(stdout);
 
   while (1) {
-    memset(buffer, BACKGROUND, sizeof buffer);
-    memset(zBuffer, 0, sizeof zBuffer);
+    syncTerminalSize();
+
+    size_t pixels = (size_t)width * (size_t)height;
+    memset(buffer, BACKGROUND, pixels);
+    memset(zBuffer, 0, pixels * sizeof zBuffer[0]);
     updateRotation();
 
     renderCube(20, -2.f * 20.f);
     renderCube(10, 1.f * 10.f);
     renderCube(5, 8.f * 5.f);
 
-    printf("\x1b[H");
     presentFrame();
-    fflush(stdout);
 
     A += 0.05f;
     B += 0.05f;
