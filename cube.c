@@ -4,12 +4,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 enum { MAX_WIDTH = 200, MAX_HEIGHT = 100, MAX_PIXELS = MAX_WIDTH * MAX_HEIGHT };
 
+/* Target frame period — same as the old usleep(16000). */
+enum { FRAME_NS = 16 * 1000 * 1000 };
+
 static int width = 80;
 static int height = 24;
+static volatile sig_atomic_t sizeDirty = 1;
 
 static float A, B, C;
 static float zBuffer[MAX_PIXELS];
@@ -30,10 +35,15 @@ static void restoreTerminal(void) {
   fflush(stdout);
 }
 
-static void onSignal(int sig) {
+static void onExitSignal(int sig) {
   (void)sig;
   restoreTerminal();
   _exit(0);
+}
+
+static void onWinch(int sig) {
+  (void)sig;
+  sizeDirty = 1;
 }
 
 static void syncTerminalSize(void) {
@@ -62,6 +72,7 @@ static void syncTerminalSize(void) {
 
   width = cols;
   height = rows;
+  sizeDirty = 0;
 }
 
 static void updateRotation(void) {
@@ -80,27 +91,6 @@ static void updateRotation(void) {
   R22 = cA * cB;
 }
 
-static void plot(float x, float y, float z, float horizontalOffset, char ch) {
-  z += DISTANCE_FROM_CAM;
-  if (z <= 0.f) {
-    return;
-  }
-
-  float ooz = 1.f / z;
-  int xp = (int)(width / 2 + horizontalOffset + K1 * ooz * x * 2.f);
-  int yp = (int)(height / 2 + K1 * ooz * y);
-
-  if ((unsigned)xp >= (unsigned)width || (unsigned)yp >= (unsigned)height) {
-    return;
-  }
-
-  int idx = xp + yp * width;
-  if (ooz > zBuffer[idx]) {
-    zBuffer[idx] = ooz;
-    buffer[idx] = ch;
-  }
-}
-
 static void renderFace(int half, float horizontalOffset, char ch, int i0,
                        int j0, int k0, int diu, int dju, int dku, int div,
                        int djv, int dkv) {
@@ -115,11 +105,30 @@ static void renderFace(int half, float horizontalOffset, char ch, int i0,
   float Y = R10 * i0 + R11 * j0 + R12 * k0;
   float Z = R20 * i0 + R21 * j0 + R22 * k0;
 
+  const float cx = (float)(width / 2) + horizontalOffset;
+  const float cy = (float)(height / 2);
+  const float scaleX = K1 * 2.f;
+  const float scaleY = K1;
+  const int w = width;
+  const int h = height;
+
   int n = half * 2;
   for (int u = 0; u < n; u++) {
     float x = X, y = Y, z = Z;
     for (int v = 0; v < n; v++) {
-      plot(x, y, z, horizontalOffset, ch);
+      float zCam = z + DISTANCE_FROM_CAM;
+      if (zCam > 0.f) {
+        float ooz = 1.f / zCam;
+        int xp = (int)(cx + scaleX * ooz * x);
+        int yp = (int)(cy + scaleY * ooz * y);
+        if ((unsigned)xp < (unsigned)w && (unsigned)yp < (unsigned)h) {
+          int idx = xp + yp * w;
+          if (ooz > zBuffer[idx]) {
+            zBuffer[idx] = ooz;
+            buffer[idx] = ch;
+          }
+        }
+      }
       x += Xv;
       y += Yv;
       z += Zv;
@@ -163,10 +172,33 @@ static void presentFrame(void) {
   fflush(stdout);
 }
 
+static long elapsedNs(const struct timespec *start,
+                      const struct timespec *end) {
+  return (end->tv_sec - start->tv_sec) * 1000000000L +
+         (end->tv_nsec - start->tv_nsec);
+}
+
+static void sleepRemaining(const struct timespec *frameStart) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+
+  long used = elapsedNs(frameStart, &now);
+  long left = (long)FRAME_NS - used;
+  if (left <= 0) {
+    return;
+  }
+
+  struct timespec req;
+  req.tv_sec = left / 1000000000L;
+  req.tv_nsec = left % 1000000000L;
+  nanosleep(&req, NULL);
+}
+
 int main(void) {
   setvbuf(stdout, NULL, _IOFBF, 1 << 16);
-  signal(SIGINT, onSignal);
-  signal(SIGTERM, onSignal);
+  signal(SIGINT, onExitSignal);
+  signal(SIGTERM, onExitSignal);
+  signal(SIGWINCH, onWinch);
   atexit(restoreTerminal);
 
   syncTerminalSize();
@@ -176,7 +208,12 @@ int main(void) {
   fflush(stdout);
 
   while (1) {
-    syncTerminalSize();
+    struct timespec frameStart;
+    clock_gettime(CLOCK_MONOTONIC, &frameStart);
+
+    if (sizeDirty) {
+      syncTerminalSize();
+    }
 
     size_t pixels = (size_t)width * (size_t)height;
     memset(buffer, BACKGROUND, pixels);
@@ -192,7 +229,8 @@ int main(void) {
     A += 0.05f;
     B += 0.05f;
     C += 0.01f;
-    usleep(8000 * 2);
+
+    sleepRemaining(&frameStart);
   }
 
   return 0;
